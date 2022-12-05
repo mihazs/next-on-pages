@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, stat, readdir } from "fs/promises";
+import { readFile, writeFile, mkdir, stat, readdir, access } from "fs/promises";
 import { exit } from "process";
 import { spawn } from "child_process";
 import { dirname, join, relative, resolve } from "path";
@@ -38,7 +38,23 @@ const prepVercel = async () => {
   console.log("⚡️ Installing 'vercel' CLI...");
   console.log("⚡️");
 
-  const vercelBuild = spawn("npm", ["install", "-D", "vercel"]);
+  const pkgManager = await getPkgManager();
+  let vercelBuild;
+
+  switch (pkgManager) {
+    case "pnpm":
+      console.log('⚡️ Detected "pnpm", running pnpm add -D vercel');
+      console.log("⚡️");
+      vercelBuild = spawn("pnpm", ["add", "-D", "vercel"]);
+      break;
+    case "yarn":
+      console.log('⚡️ Detected "yarn", running yarn add -D vercel');
+      console.log("⚡️");
+      vercelBuild = spawn("yarn", ["add", "-D", "vercel"]);
+      break;
+    default:
+      vercelBuild = spawn("npm", ["install", "-D", "vercel"]);
+  }
 
   vercelBuild.stdout.on("data", (data) => {
     const lines: string[] = data.toString().split("\n");
@@ -223,8 +239,8 @@ const transform = async ({
           let contents = await readFile(functionFile, "utf8");
           contents = contents.replace(
             // TODO: This hack is not good. We should replace this with something less brittle ASAP
-            /(Object.defineProperty\(globalThis,\s*"__import_unsupported",\s*{[\s\S]*?configurable:\s*)([^,}]*)(.*}\s*\))/gm,
-            "$1true$3"
+            /Object.defineProperty\(globalThis,\s*"__import_unsupported",\s*{[\s\S]*configurable:\s*([^,}]*).*}\s*\)/gm,
+            "true"
           );
 
           if (experimentalMinify) {
@@ -378,23 +394,13 @@ const transform = async ({
     }
 
     for (const entry of functionsEntries) {
-      if (
-        `pages/${name}` === entry?.name ||
-        `app${name !== "index" ? `/${name}` : ""}/page` === entry?.name
-      ) {
+      if (`pages/${name}` === entry?.name) {
         hydratedFunctions.set(name, { matchers: entry.matchers, filepath });
       }
     }
   }
 
-  const rscFunctions = [...functionsMap.keys()].filter((name) =>
-    name.endsWith(".rsc")
-  );
-
-  if (
-    hydratedMiddleware.size + hydratedFunctions.size !==
-    functionsMap.size - rscFunctions.length
-  ) {
+  if (hydratedMiddleware.size + hydratedFunctions.size !== functionsMap.size) {
     console.error(
       "⚡️ ERROR: Could not map all functions to an entry in the manifest."
     );
@@ -579,3 +585,40 @@ const main = async ({
     })
   );
 })();
+
+type PackageManager = "npm" | "pnpm" | "yarn";
+
+async function exists(path) {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function getPkgManager(): Promise<PackageManager> {
+  // Use npm_config_user_agent if it's set
+  const userAgent = process.env.npm_config_user_agent;
+
+  if (userAgent) {
+    if (userAgent.startsWith("yarn")) {
+      return "yarn";
+    } else if (userAgent.startsWith("pnpm")) {
+      return "pnpm";
+    } else {
+      return "npm";
+    }
+  }
+
+  const hasYarnLock = await exists("yarn.lock");
+  const hasPnpmLock = await exists("pnpm-lock.yaml");
+
+  if (hasYarnLock) {
+    return "yarn";
+  } else if (hasPnpmLock) {
+    return "pnpm";
+  } else {
+    return "npm";
+  }
+}
